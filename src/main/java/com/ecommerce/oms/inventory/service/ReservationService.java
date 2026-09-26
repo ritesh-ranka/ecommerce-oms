@@ -303,6 +303,45 @@ public class ReservationService {
     }
 
     // =================================================================================
+    // Restock support
+    // =================================================================================
+
+    /** Where a given quantity of a SKU should be returned to. */
+    public record RestockTarget(Long variantId, Long warehouseId, int quantity) {
+    }
+
+    /**
+     * The committed allocations for an order: what shipped, and from where.
+     *
+     * <p>Consumed by cancellation and returns so goods go back to the warehouse they actually left,
+     * rather than to a default location. Restocking to the wrong warehouse is invisible in the totals
+     * but wrong on the shelf, and it quietly corrupts the allocation strategy's proximity decisions
+     * from then on.
+     */
+    @Transactional(readOnly = true)
+    public List<RestockTarget> committedAllocationsFor(Long orderId) {
+        return reservationRepository.findByOrderIdAndStatus(orderId, ReservationStatus.COMMITTED).stream()
+                .map(reservation -> new RestockTarget(
+                        reservation.getVariantId(), reservation.getWarehouseId(), reservation.getQuantity()))
+                .toList();
+    }
+
+    /**
+     * The warehouse a specific SKU shipped from for this order.
+     *
+     * <p>Used by partial returns, where only some units of one line come back. A split allocation can
+     * produce more than one warehouse for a SKU; the first committed hold is returned, which is the
+     * right default and keeps the common case correct without modelling per-unit provenance.
+     */
+    @Transactional(readOnly = true)
+    public Optional<Long> warehouseThatShipped(Long orderId, Long variantId) {
+        return reservationRepository.findByOrderIdAndStatus(orderId, ReservationStatus.COMMITTED).stream()
+                .filter(reservation -> reservation.getVariantId().equals(variantId))
+                .map(StockReservation::getWarehouseId)
+                .findFirst();
+    }
+
+    // =================================================================================
     // Helpers
     // =================================================================================
 
