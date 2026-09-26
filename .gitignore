@@ -16,3 +16,6 @@ logs/
 
 logs/
 .vscode/
+
+# Local-only working notes (video script, scratch). Never committed.
+local-notes/
