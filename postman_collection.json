@@ -1,0 +1,1036 @@
+{
+  "info": {
+    "name": "E-commerce Order Management",
+    "_postman_id": "8f2c1a94-6b3d-4e57-9a21-5c7e0d8f3b44",
+    "description": "Multi-warehouse order management: catalog, cart, checkout with reservation-based inventory, payments, fulfillment, returns and refunds.\n\n## Setup\n\n1. Start the app: `mvn spring-boot:run`\n2. Run **1. Authentication → Login (customer)** — the token is captured automatically into a collection variable.\n3. Work through the folders in order. Order ids, shipment ids, and return ids are all captured by test scripts, so nothing needs pasting by hand.\n\nCollection-level Bearer auth is configured, so every request inherits the right token.\n\n## Folders\n\n| Folder | What it demonstrates |\n|---|---|\n| 1. Authentication | Login for each role |\n| 2. Catalog (public) | Browse without a token |\n| 3. Cart & Pricing | The preview breakdown — discount cap, post-discount tax |\n| 4. Checkout | Happy path, plus every payment failure branch |\n| 5. Orders | Tracking, cancellation |\n| 6. Fulfillment | Pack → ship → deliver as warehouse staff |\n| 7. Returns & Refunds | Partial return with exact pro-rata refund |\n| 8. Inventory (admin) | Stock levels, the movement ledger |\n| 9. Admin — Catalog & Pricing | Products, coupons, tax rates |\n| 10. Admin — Operations | Outbox health, audit trail, payment reconciliation |\n| 11. Access Control | 403 by role, 404 for cross-customer |\n\n## Seeded accounts\n\nAll with password `Password@123`: `admin@oms.dev`, `customer@oms.dev`, `customer2@oms.dev`, `staff.mum@oms.dev` (Mumbai), `staff.del@oms.dev` (Delhi).\n\n## Forcing payment outcomes\n\nThe simulated gateway is deterministic. Set `paymentToken` to `tok_decline` (402), `tok_timeout` (502, holds retained), `tok_error` (502), `tok_slow` (slow success), or anything else (success).",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "auth": {
+    "type": "bearer",
+    "bearer": [{ "key": "token", "value": "{{customerToken}}", "type": "string" }]
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "http://localhost:8080/api/v1", "type": "string" },
+    { "key": "password", "value": "Password@123", "type": "string" },
+    { "key": "customerToken", "value": "", "type": "string" },
+    { "key": "adminToken", "value": "", "type": "string" },
+    { "key": "staffToken", "value": "", "type": "string" },
+    { "key": "otherCustomerToken", "value": "", "type": "string" },
+    { "key": "orderId", "value": "", "type": "string" },
+    { "key": "orderNumber", "value": "", "type": "string" },
+    { "key": "orderLineId", "value": "", "type": "string" },
+    { "key": "shipmentId", "value": "", "type": "string" },
+    { "key": "returnId", "value": "", "type": "string" },
+    { "key": "idempotencyKey", "value": "", "type": "string" }
+  ],
+  "item": [
+    {
+      "name": "1. Authentication",
+      "description": "Tokens are captured into collection variables by the test scripts.",
+      "item": [
+        {
+          "name": "Login (customer)",
+          "event": [{
+            "listen": "test",
+            "script": { "exec": [
+              "pm.test('200 OK', () => pm.response.to.have.status(200));",
+              "const token = pm.response.json().data.accessToken;",
+              "pm.collectionVariables.set('customerToken', token);",
+              "pm.test('token captured', () => pm.expect(token).to.be.a('string').and.not.empty);"
+            ], "type": "text/javascript" }
+          }],
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"email\": \"customer@oms.dev\",\n  \"password\": \"{{password}}\"\n}" },
+            "url": { "raw": "{{baseUrl}}/auth/login", "host": ["{{baseUrl}}"], "path": ["auth", "login"] },
+            "description": "Stateless HS256 token, 12-hour TTL. Roles and warehouse assignment travel as claims, so request authorization needs no database round trip."
+          }
+        },
+        {
+          "name": "Login (admin)",
+          "event": [{
+            "listen": "test",
+            "script": { "exec": [
+              "pm.test('200 OK', () => pm.response.to.have.status(200));",
+              "pm.collectionVariables.set('adminToken', pm.response.json().data.accessToken);"
+            ], "type": "text/javascript" }
+          }],
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"email\": \"admin@oms.dev\",\n  \"password\": \"{{password}}\"\n}" },
+            "url": { "raw": "{{baseUrl}}/auth/login", "host": ["{{baseUrl}}"], "path": ["auth", "login"] }
+          }
+        },
+        {
+          "name": "Login (warehouse staff — Mumbai)",
+          "event": [{
+            "listen": "test",
+            "script": { "exec": [
+              "pm.test('200 OK', () => pm.response.to.have.status(200));",
+              "pm.collectionVariables.set('staffToken', pm.response.json().data.accessToken);",
+              "pm.test('scoped to a warehouse', () => pm.expect(pm.response.json().data.user.warehouseIds).to.not.be.empty);"
+            ], "type": "text/javascript" }
+          }],
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"email\": \"staff.mum@oms.dev\",\n  \"password\": \"{{password}}\"\n}" },
+            "url": { "raw": "{{baseUrl}}/auth/login", "host": ["{{baseUrl}}"], "path": ["auth", "login"] },
+            "description": "`warehouseIds` in the response is what scopes the fulfillment queue. Mumbai staff cannot act on a Delhi parcel."
+          }
+        },
+        {
+          "name": "Login (second customer)",
+          "event": [{
+            "listen": "test",
+            "script": { "exec": [
+              "pm.collectionVariables.set('otherCustomerToken', pm.response.json().data.accessToken);"
+            ], "type": "text/javascript" }
+          }],
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"email\": \"customer2@oms.dev\",\n  \"password\": \"{{password}}\"\n}" },
+            "url": { "raw": "{{baseUrl}}/auth/login", "host": ["{{baseUrl}}"], "path": ["auth", "login"] },
+            "description": "Used by the access-control folder to prove cross-customer reads return 404."
+          }
+        },
+        {
+          "name": "Register a new customer",
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"email\": \"new.customer@example.com\",\n  \"password\": \"{{password}}\",\n  \"fullName\": \"New Customer\",\n  \"phone\": \"9000000009\",\n  \"zone\": \"WEST\"\n}" },
+            "url": { "raw": "{{baseUrl}}/auth/register", "host": ["{{baseUrl}}"], "path": ["auth", "register"] },
+            "description": "Always yields ROLE_CUSTOMER. Letting a caller pick their role would make RBAC decorative."
+          }
+        },
+        {
+          "name": "Who am I",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/auth/me", "host": ["{{baseUrl}}"], "path": ["auth", "me"] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "2. Catalog (public)",
+      "description": "Unauthenticated on purpose: a storefront must be shoppable before anyone signs in.",
+      "item": [
+        {
+          "name": "Category tree",
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/categories", "host": ["{{baseUrl}}"], "path": ["categories"] },
+            "description": "Nested. The tree is not decoration: tax resolution walks it upward and browse walks it downward."
+          }
+        },
+        {
+          "name": "Search products",
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/products?categorySlug=audio&maxPrice=20000&size=5",
+              "host": ["{{baseUrl}}"], "path": ["products"],
+              "query": [
+                { "key": "q", "value": "nimbus", "disabled": true },
+                { "key": "categorySlug", "value": "audio" },
+                { "key": "categoryId", "value": "3", "disabled": true },
+                { "key": "brand", "value": "Nimbus", "disabled": true },
+                { "key": "minPrice", "value": "1000", "disabled": true },
+                { "key": "maxPrice", "value": "20000" },
+                { "key": "size", "value": "5" }
+              ]
+            },
+            "description": "All filters optional and composable. Filtering by a parent category includes its descendants, so `categorySlug=apparel` also returns Men and Women products."
+          }
+        },
+        {
+          "name": "Product detail",
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/products/3", "host": ["{{baseUrl}}"], "path": ["products", "3"] },
+            "description": "The `variants[].id` values here are what POST /cart/items expects."
+          }
+        }
+      ]
+    },
+    {
+      "name": "3. Cart & Pricing",
+      "description": "The cart holds no prices and reserves no stock. Prices resolve from the live catalog; reservation begins at checkout.",
+      "item": [
+        {
+          "name": "Add 2 x Nimbus Buds Pro",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"variantId\": 4,\n  \"quantity\": 2\n}" },
+            "url": { "raw": "{{baseUrl}}/cart/items", "host": ["{{baseUrl}}"], "path": ["cart", "items"] },
+            "description": "Merges with an existing line for the same SKU rather than creating a duplicate."
+          }
+        },
+        {
+          "name": "Get cart",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/cart", "host": ["{{baseUrl}}"], "path": ["cart"] },
+            "description": "Indicative subtotal only — call /cart/preview for the real breakdown. No endpoint accepts a cart id, so reading someone else's basket is unexpressible."
+          }
+        },
+        {
+          "name": "Preview with SAVE10  ⭐",
+          "event": [{
+            "listen": "test",
+            "script": { "exec": [
+              "pm.test('200 OK', () => pm.response.to.have.status(200));",
+              "const p = pm.response.json().data.pricing;",
+              "pm.test('subtotal 15998.00', () => pm.expect(Number(p.subtotal.amount)).to.eql(15998));",
+              "pm.test('discount capped at 500.00, not 10% of 15998', () => pm.expect(Number(p.discountTotal.amount)).to.eql(500));",
+              "pm.test('tax is 18% of the POST-discount 15498.00', () => pm.expect(Number(p.taxTotal.amount)).to.eql(2789.64));",
+              "pm.test('shipping free above the threshold', () => pm.expect(Number(p.shippingFee.amount)).to.eql(0));",
+              "pm.test('total 18287.64', () => pm.expect(Number(p.grandTotal.amount)).to.eql(18287.64));"
+            ], "type": "text/javascript" }
+          }],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"couponCode\": \"SAVE10\",\n  \"destinationZone\": \"WEST\"\n}" },
+            "url": { "raw": "{{baseUrl}}/cart/preview", "host": ["{{baseUrl}}"], "path": ["cart", "preview"] },
+            "description": "**The most informative call in the collection.** Runs the same pricing engine checkout runs, so the preview cannot disagree with the charge.\n\n| | Amount | Why |\n|---|---|---|\n| Subtotal | 15998.00 | 2 × 7999.00 |\n| Discount | 500.00 | SAVE10 is 10% (1599.80) but **caps at 500.00** |\n| Tax | 2789.64 | 18% of **15498.00** — the *post-discount* base |\n| Shipping | 0.00 | free above 999.00 post-discount |\n| **Total** | **18287.64** | |\n\nAlso note `lines[0].lineDiscount` — the coupon apportioned down to the line. That is persisted on the order at checkout, and is what makes a correct partial refund computable later."
+          }
+        },
+        {
+          "name": "Preview with an expired coupon (422)",
+          "event": [{
+            "listen": "test",
+            "script": { "exec": [
+              "pm.test('422', () => pm.response.to.have.status(422));",
+              "pm.test('DISCOUNT_NOT_APPLICABLE with a reason', () => {",
+              "  pm.expect(pm.response.json().code).to.eql('DISCOUNT_NOT_APPLICABLE');",
+              "  pm.expect(pm.response.json().message.toLowerCase()).to.include('expired');",
+              "});"
+            ], "type": "text/javascript" }
+          }],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"couponCode\": \"EXPIRED5\"\n}" },
+            "url": { "raw": "{{baseUrl}}/cart/preview", "host": ["{{baseUrl}}"], "path": ["cart", "preview"] },
+            "description": "An invalid coupon fails loudly with the reason rather than being silently ignored — otherwise the customer stares at a total that does not match the promotion they were shown."
+          }
+        },
+        {
+          "name": "Update line quantity",
+          "request": {
+            "method": "PATCH",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"quantity\": 2\n}" },
+            "url": { "raw": "{{baseUrl}}/cart/items/4", "host": ["{{baseUrl}}"], "path": ["cart", "items", "4"] },
+            "description": "Absolute value, not a delta."
+          }
+        },
+        {
+          "name": "Remove a line",
+          "request": {
+            "method": "DELETE",
+            "url": { "raw": "{{baseUrl}}/cart/items/4", "host": ["{{baseUrl}}"], "path": ["cart", "items", "4"] }
+          }
+        },
+        {
+          "name": "Empty the cart",
+          "request": {
+            "method": "DELETE",
+            "url": { "raw": "{{baseUrl}}/cart", "host": ["{{baseUrl}}"], "path": ["cart"] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "4. Checkout",
+      "description": "The one endpoint that runs a saga:\n\n```\nTX-1   reserve · price · persist order+payment      locks held, ms\n——     gateway call                    NO transaction, NO locks\nTX-2   commit+capture  OR  release+fail             locks held, ms\n——     outbox: routing · notification · audit   after the response\n```",
+      "item": [
+        {
+          "name": "Checkout — success  ⭐",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": { "exec": [
+                "// A fresh key per run, so the request is not replayed from a previous run.",
+                "pm.collectionVariables.set('idempotencyKey', 'pm-' + Date.now() + '-' + Math.floor(Math.random() * 100000));"
+              ], "type": "text/javascript" }
+            },
+            {
+              "listen": "test",
+              "script": { "exec": [
+                "pm.test('201 Created', () => pm.response.to.have.status(201));",
+                "const d = pm.response.json().data;",
+                "pm.collectionVariables.set('orderId', d.orderId);",
+                "pm.collectionVariables.set('orderNumber', d.orderNumber);",
+                "pm.test('order CONFIRMED', () => pm.expect(d.status).to.eql('CONFIRMED'));",
+                "pm.test('payment CAPTURED', () => pm.expect(d.payment.status).to.eql('CAPTURED'));",
+                "pm.test('charged total equals the previewed total', () => pm.expect(Number(d.grandTotal.amount)).to.eql(18287.64));",
+                "pm.test('routed to at least one warehouse', () => pm.expect(d.fulfillingWarehouseIds).to.not.be.empty);"
+              ], "type": "text/javascript" }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Idempotency-Key", "value": "{{idempotencyKey}}", "description": "Required. A UUID or any unique string." }
+            ],
+            "body": { "mode": "raw", "raw": "{\n  \"shippingAddress\": {\n    \"recipientName\": \"Cara Customer\",\n    \"line1\": \"42 Marine Drive, Flat 9B\",\n    \"city\": \"Mumbai\",\n    \"zone\": \"WEST\",\n    \"postalCode\": \"400020\",\n    \"phone\": \"9000000002\"\n  },\n  \"paymentMethod\": \"CARD\",\n  \"paymentToken\": \"tok_success\",\n  \"couponCode\": \"SAVE10\"\n}" },
+            "url": { "raw": "{{baseUrl}}/checkout", "host": ["{{baseUrl}}"], "path": ["checkout"] },
+            "description": "Run **3. Cart → Add 2 x Nimbus Buds Pro** first.\n\nThe response total is *exactly* the previewed total, because both run one pricing engine.\n\n`zone: WEST` is the allocation proximity hint — it makes the strategy prefer the Mumbai warehouse.\n\nFulfillment routing, the notification, and the audit trail all run **after** this response."
+          }
+        },
+        {
+          "name": "Checkout — replay the same key",
+          "event": [{
+            "listen": "test",
+            "script": { "exec": [
+              "pm.test('replays the original status', () => pm.response.to.have.status(201));",
+              "pm.test('Idempotent-Replay header set', () => pm.expect(pm.response.headers.get('Idempotent-Replay')).to.eql('true'));",
+              "pm.test('same order, not a new one', () => pm.expect(String(pm.response.json().data.orderId)).to.eql(String(pm.collectionVariables.get('orderId'))));"
+            ], "type": "text/javascript" }
+          }],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Idempotency-Key", "value": "{{idempotencyKey}}" }
+            ],
+            "body": { "mode": "raw", "raw": "{\n  \"shippingAddress\": {\n    \"recipientName\": \"Cara Customer\",\n    \"line1\": \"42 Marine Drive, Flat 9B\",\n    \"city\": \"Mumbai\",\n    \"zone\": \"WEST\",\n    \"postalCode\": \"400020\",\n    \"phone\": \"9000000002\"\n  },\n  \"paymentMethod\": \"CARD\",\n  \"paymentToken\": \"tok_success\",\n  \"couponCode\": \"SAVE10\"\n}" },
+            "url": { "raw": "{{baseUrl}}/checkout", "host": ["{{baseUrl}}"], "path": ["checkout"] },
+            "description": "Send immediately after the previous request — identical key, identical body.\n\nSame order id, same 201, `Idempotent-Replay: true`, and **one** charge. No second order and no second unit of stock consumed. This is the guard against a double-clicked Pay button."
+          }
+        },
+        {
+          "name": "Checkout — same key, different body (422)",
+          "event": [{
+            "listen": "test",
+            "script": { "exec": [
+              "pm.test('422', () => pm.response.to.have.status(422));",
+              "pm.test('IDEMPOTENCY_KEY_REUSED', () => pm.expect(pm.response.json().code).to.eql('IDEMPOTENCY_KEY_REUSED'));"
+            ], "type": "text/javascript" }
+          }],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Idempotency-Key", "value": "{{idempotencyKey}}" }
+            ],
+            "body": { "mode": "raw", "raw": "{\n  \"shippingAddress\": {\n    \"recipientName\": \"Someone Else\",\n    \"line1\": \"1 Other Road\",\n    \"city\": \"Delhi\",\n    \"zone\": \"NORTH\",\n    \"postalCode\": \"110001\",\n    \"phone\": \"9000000005\"\n  },\n  \"paymentMethod\": \"UPI\",\n  \"paymentToken\": \"tok_success\"\n}" },
+            "url": { "raw": "{{baseUrl}}/checkout", "host": ["{{baseUrl}}"], "path": ["checkout"] },
+            "description": "Replaying here would hand the caller an answer to a question they did not ask, which is worse than an error."
+          }
+        },
+        {
+          "name": "Checkout — declined (402)",
+          "event": [{
+            "listen": "test",
+            "script": { "exec": [
+              "pm.test('402', () => pm.response.to.have.status(402));",
+              "pm.test('PAYMENT_DECLINED', () => pm.expect(pm.response.json().code).to.eql('PAYMENT_DECLINED'));",
+              "pm.test('reports that stock was released', () => pm.expect(pm.response.json().details[0].stockReleased).to.be.true);"
+            ], "type": "text/javascript" }
+          }],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Idempotency-Key", "value": "pm-decline-{{$randomUUID}}" }
+            ],
+            "body": { "mode": "raw", "raw": "{\n  \"shippingAddress\": {\n    \"recipientName\": \"Cara Customer\",\n    \"line1\": \"42 Marine Drive\",\n    \"city\": \"Mumbai\",\n    \"zone\": \"WEST\",\n    \"postalCode\": \"400020\",\n    \"phone\": \"9000000002\"\n  },\n  \"paymentMethod\": \"CARD\",\n  \"paymentToken\": \"tok_decline\"\n}" },
+            "url": { "raw": "{{baseUrl}}/checkout", "host": ["{{baseUrl}}"], "path": ["checkout"] },
+            "description": "Add an item to the cart first.\n\nA decline is **final**, so the stock hold goes straight back. The order is kept as `PAYMENT_FAILED` rather than deleted, so the customer sees the attempt in their history and support can explain it."
+          }
+        },
+        {
+          "name": "Checkout — unknown outcome (502)  ⭐",
+          "event": [{
+            "listen": "test",
+            "script": { "exec": [
+              "pm.test('502', () => pm.response.to.have.status(502));",
+              "pm.test('PAYMENT_UNCONFIRMED', () => pm.expect(pm.response.json().code).to.eql('PAYMENT_UNCONFIRMED'));",
+              "pm.test('client told the retry is safe', () => pm.expect(pm.response.json().details[0].retrySafe).to.be.true);",
+              "pm.test('order left AWAITING_PAYMENT', () => pm.expect(pm.response.json().details[0].orderStatus).to.eql('AWAITING_PAYMENT'));"
+            ], "type": "text/javascript" }
+          }],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Idempotency-Key", "value": "pm-timeout-{{$randomUUID}}" }
+            ],
+            "body": { "mode": "raw", "raw": "{\n  \"shippingAddress\": {\n    \"recipientName\": \"Cara Customer\",\n    \"line1\": \"42 Marine Drive\",\n    \"city\": \"Mumbai\",\n    \"zone\": \"WEST\",\n    \"postalCode\": \"400020\",\n    \"phone\": \"9000000002\"\n  },\n  \"paymentMethod\": \"CARD\",\n  \"paymentToken\": \"tok_timeout\"\n}" },
+            "url": { "raw": "{{baseUrl}}/checkout", "host": ["{{baseUrl}}"], "path": ["checkout"] },
+            "description": "**The most interesting failure branch.** The gateway gave no answer, so the charge may or may not have happened.\n\nThe stock hold is deliberately **retained** — releasing it could sell units the customer has already paid for. The payment is flagged `UNCONFIRMED` and appears in **10. Admin → Unconfirmed payments**.\n\nIf nothing resolves it, the reservation TTL returns the stock and the sweeper cancels the order. Bounded and self-healing rather than permanently inconsistent."
+          }
+        },
+        {
+          "name": "Checkout — insufficient stock (409)",
+          "event": [{
+            "listen": "test",
+            "script": { "exec": [
+              "pm.test('409', () => pm.response.to.have.status(409));",
+              "pm.test('INSUFFICIENT_STOCK with a per-SKU breakdown', () => {",
+              "  const body = pm.response.json();",
+              "  pm.expect(body.code).to.eql('INSUFFICIENT_STOCK');",
+              "  pm.expect(body.details[0]).to.have.property('sku');",
+              "  pm.expect(body.details[0]).to.have.property('requested');",
+              "  pm.expect(body.details[0]).to.have.property('available');",
+              "});"
+            ], "type": "text/javascript" }
+          }],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Idempotency-Key", "value": "pm-oversell-{{$randomUUID}}" }
+            ],
+            "body": { "mode": "raw", "raw": "{\n  \"shippingAddress\": {\n    \"recipientName\": \"Cara Customer\",\n    \"line1\": \"42 Marine Drive\",\n    \"city\": \"Mumbai\",\n    \"zone\": \"WEST\",\n    \"postalCode\": \"400020\",\n    \"phone\": \"9000000002\"\n  },\n  \"paymentMethod\": \"CARD\",\n  \"paymentToken\": \"tok_success\"\n}" },
+            "url": { "raw": "{{baseUrl}}/checkout", "host": ["{{baseUrl}}"], "path": ["checkout"] },
+            "description": "First add **3** units of variant 9 (`TEE-BLK-M`) to the cart — it is seeded with exactly **one** unit network-wide.\n\nThe error carries a per-SKU shortfall so the client can tell the customer exactly which line failed and by how much. Nothing is held: TX-1 rolled back entirely.\n\nFor the real proof — 50 simultaneous checkouts against that one unit — run:\n`mvn verify -Dit.test=OversellPreventionIT -Dtest=MoneyTest`"
+          }
+        }
+      ]
+    },
+    {
+      "name": "5. Orders",
+      "item": [
+        {
+          "name": "My orders",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/orders?page=0&size=20",
+              "host": ["{{baseUrl}}"], "path": ["orders"],
+              "query": [
+                { "key": "page", "value": "0" }, { "key": "size", "value": "20" },
+                { "key": "status", "value": "CONFIRMED", "disabled": true }
+              ]
+            },
+            "description": "Scoped to the authenticated customer."
+          }
+        },
+        {
+          "name": "Order detail",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/orders/{{orderId}}", "host": ["{{baseUrl}}"], "path": ["orders", "{{orderId}}"] },
+            "description": "Money breakdown, per-line discount share and tax, payment state, `refundedTotal`, and `allowedNextStatuses` read straight from the state machine — so a client never hard-codes the lifecycle."
+          }
+        },
+        {
+          "name": "Order by number",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/orders/by-number/{{orderNumber}}", "host": ["{{baseUrl}}"], "path": ["orders", "by-number", "{{orderNumber}}"] },
+            "description": "The form a customer reads off a confirmation."
+          }
+        },
+        {
+          "name": "Cancel order",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"reason\": \"Ordered by mistake\"\n}" },
+            "url": { "raw": "{{baseUrl}}/orders/{{orderId}}/cancel", "host": ["{{baseUrl}}"], "path": ["orders", "{{orderId}}", "cancel"] },
+            "description": "Permitted from `AWAITING_PAYMENT`, `CONFIRMED`, `PACKED`. Once `SHIPPED`, returns 409 — the goods are with a carrier and returns are the only route back.\n\nOne transaction, **refund before restock**: if the refund fails everything rolls back. Also releases the coupon redemption."
+          }
+        }
+      ]
+    },
+    {
+      "name": "6. Fulfillment",
+      "description": "Warehouse staff. Uses `{{staffToken}}` — run **1. Authentication → Login (warehouse staff)** first.",
+      "item": [
+        {
+          "name": "Work queue",
+          "request": {
+            "auth": { "type": "bearer", "bearer": [{ "key": "token", "value": "{{staffToken}}" }] },
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/fulfillment/queue?status=PENDING",
+              "host": ["{{baseUrl}}"], "path": ["fulfillment", "queue"],
+              "query": [{ "key": "status", "value": "PENDING" }]
+            },
+            "description": "Scoped to the warehouses this staff member is assigned to. These shipments were created by the **asynchronous** pipeline, so a queue entry is itself evidence that routing ran after the checkout response."
+          }
+        },
+        {
+          "name": "Shipments for an order",
+          "event": [{
+            "listen": "test",
+            "script": { "exec": [
+              "const shipments = pm.response.json().data;",
+              "if (shipments.length) { pm.collectionVariables.set('shipmentId', shipments[0].id); }",
+              "pm.test('at least one parcel exists', () => pm.expect(shipments).to.not.be.empty);"
+            ], "type": "text/javascript" }
+          }],
+          "request": {
+            "auth": { "type": "bearer", "bearer": [{ "key": "token", "value": "{{staffToken}}" }] },
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/fulfillment/orders/{{orderId}}/shipments", "host": ["{{baseUrl}}"], "path": ["fulfillment", "orders", "{{orderId}}", "shipments"] },
+            "description": "A split allocation produces more than one parcel, each moving independently."
+          }
+        },
+        {
+          "name": "Mark PACKED",
+          "request": {
+            "auth": { "type": "bearer", "bearer": [{ "key": "token", "value": "{{staffToken}}" }] },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"status\": \"PACKED\"\n}" },
+            "url": { "raw": "{{baseUrl}}/fulfillment/shipments/{{shipmentId}}/status", "host": ["{{baseUrl}}"], "path": ["fulfillment", "shipments", "{{shipmentId}}", "status"] },
+            "description": "The **order** status is derived from the least advanced parcel, so a two-parcel order only becomes PACKED once both are packed."
+          }
+        },
+        {
+          "name": "Mark SHIPPED",
+          "event": [{
+            "listen": "test",
+            "script": { "exec": [
+              "pm.test('tracking number minted at dispatch', () => pm.expect(pm.response.json().data.trackingNumber).to.be.a('string').and.not.empty);"
+            ], "type": "text/javascript" }
+          }],
+          "request": {
+            "auth": { "type": "bearer", "bearer": [{ "key": "token", "value": "{{staffToken}}" }] },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"status\": \"SHIPPED\"\n}" },
+            "url": { "raw": "{{baseUrl}}/fulfillment/shipments/{{shipmentId}}/status", "host": ["{{baseUrl}}"], "path": ["fulfillment", "shipments", "{{shipmentId}}", "status"] }
+          }
+        },
+        {
+          "name": "Mark DELIVERED",
+          "request": {
+            "auth": { "type": "bearer", "bearer": [{ "key": "token", "value": "{{staffToken}}" }] },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"status\": \"DELIVERED\"\n}" },
+            "url": { "raw": "{{baseUrl}}/fulfillment/shipments/{{shipmentId}}/status", "host": ["{{baseUrl}}"], "path": ["fulfillment", "shipments", "{{shipmentId}}", "status"] },
+            "description": "Starts the return window, which is measured from **delivery** — a parcel that took two weeks to arrive should not eat the customer's return period."
+          }
+        },
+        {
+          "name": "Skipping a step is refused (409)",
+          "event": [{
+            "listen": "test",
+            "script": { "exec": [
+              "pm.test('409 ILLEGAL_TRANSITION', () => {",
+              "  pm.response.to.have.status(409);",
+              "  pm.expect(pm.response.json().code).to.eql('ILLEGAL_TRANSITION');",
+              "});"
+            ], "type": "text/javascript" }
+          }],
+          "request": {
+            "auth": { "type": "bearer", "bearer": [{ "key": "token", "value": "{{staffToken}}" }] },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"status\": \"PACKED\"\n}" },
+            "url": { "raw": "{{baseUrl}}/fulfillment/shipments/{{shipmentId}}/status", "host": ["{{baseUrl}}"], "path": ["fulfillment", "shipments", "{{shipmentId}}", "status"] },
+            "description": "Send after DELIVERED. The transition table is closed by default, and the message names what *is* allowed."
+          }
+        }
+      ]
+    },
+    {
+      "name": "7. Returns & Refunds",
+      "description": "A customer may **ask**; only staff or an admin may **approve**. Letting the requester approve would mean self-service refunds with no inspection of the goods.",
+      "item": [
+        {
+          "name": "Get the order line id",
+          "event": [{
+            "listen": "test",
+            "script": { "exec": [
+              "const line = pm.response.json().data.lines[0];",
+              "pm.collectionVariables.set('orderLineId', line.orderLineId);",
+              "pm.test('line carries its apportioned discount share', () => pm.expect(line).to.have.property('lineDiscount'));"
+            ], "type": "text/javascript" }
+          }],
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/orders/{{orderId}}", "host": ["{{baseUrl}}"], "path": ["orders", "{{orderId}}"] },
+            "description": "Captures `orderLineId` for the next request."
+          }
+        },
+        {
+          "name": "Request a partial return  ⭐",
+          "event": [{
+            "listen": "test",
+            "script": { "exec": [
+              "pm.test('201 Created', () => pm.response.to.have.status(201));",
+              "const d = pm.response.json().data;",
+              "pm.collectionVariables.set('returnId', d.id);",
+              "pm.test('awaiting review — nothing refunded yet', () => pm.expect(d.status).to.eql('REQUESTED'));",
+              "pm.test('refund is half of what was PAID (9143.82), not half the list price (7999)', () => pm.expect(Number(d.totalRefund.amount)).to.eql(9143.82));",
+              "pm.test('sellable reason is restockable', () => pm.expect(d.restockable).to.be.true);"
+            ], "type": "text/javascript" }
+          }],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"reason\": \"SIZE_MISMATCH\",\n  \"comment\": \"Ordered medium, needed large\",\n  \"lines\": [\n    { \"orderLineId\": {{orderLineId}}, \"quantity\": 1 }\n  ]\n}" },
+            "url": { "raw": "{{baseUrl}}/orders/{{orderId}}/returns", "host": ["{{baseUrl}}"], "path": ["orders", "{{orderId}}", "returns"] },
+            "description": "Requires the order to be `DELIVERED` — run folder 6 first.\n\n**The refund figure is the point.** Returning 1 of 2 units refunds `9143.82` — half of the `18287.64` actually *paid*, with the discount share and tax both reversed. Half the list price would be `7999.00`, which would under-refund the tax and over-refund the discount.\n\nQuantities are validated against what is still returnable, counting approved **and pending** claims, so two pending requests cannot together return more than was bought.\n\nTry `reason: \"DAMAGED\"` to see `restockable: false` — damaged goods are refunded but deliberately not restocked, because putting them back would promise a unit that cannot ship."
+          }
+        },
+        {
+          "name": "Pending review queue (staff)",
+          "request": {
+            "auth": { "type": "bearer", "bearer": [{ "key": "token", "value": "{{staffToken}}" }] },
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/returns/pending", "host": ["{{baseUrl}}"], "path": ["returns", "pending"] }
+          }
+        },
+        {
+          "name": "Approve — refund and restock",
+          "request": {
+            "auth": { "type": "bearer", "bearer": [{ "key": "token", "value": "{{staffToken}}" }] },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"note\": \"Goods received in original packaging\"\n}" },
+            "url": { "raw": "{{baseUrl}}/returns/{{returnId}}/approve", "host": ["{{baseUrl}}"], "path": ["returns", "{{returnId}}", "approve"] },
+            "description": "One transaction, **refund first**: if the gateway refuses, everything rolls back and the request stays `REQUESTED` for a retry. Restocking first and then failing to refund would leave the customer out of pocket with their goods already resold.\n\nGoods go back to the warehouse that actually shipped them, keeping the shelf and the allocation strategy's proximity data in agreement.\n\nThe order becomes `RETURNED` if every unit has come back, otherwise `DELIVERED` so the remainder stays returnable."
+          }
+        },
+        {
+          "name": "Reject a return",
+          "request": {
+            "auth": { "type": "bearer", "bearer": [{ "key": "token", "value": "{{staffToken}}" }] },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"note\": \"Item shows signs of use beyond inspection\"\n}" },
+            "url": { "raw": "{{baseUrl}}/returns/{{returnId}}/reject", "host": ["{{baseUrl}}"], "path": ["returns", "{{returnId}}", "reject"] },
+            "description": "Nothing refunded or restocked. The order returns to `DELIVERED` so the customer can raise a fresh request rather than being permanently stuck."
+          }
+        },
+        {
+          "name": "Return history for an order",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/orders/{{orderId}}/returns", "host": ["{{baseUrl}}"], "path": ["orders", "{{orderId}}", "returns"] }
+          }
+        },
+        {
+          "name": "Confirm the refund landed",
+          "event": [{
+            "listen": "test",
+            "script": { "exec": [
+              "const d = pm.response.json().data;",
+              "pm.test('refundedTotal recorded', () => pm.expect(Number(d.refundedTotal.amount)).to.be.above(0));",
+              "pm.test('payment PARTIALLY_REFUNDED', () => pm.expect(d.payment.status).to.eql('PARTIALLY_REFUNDED'));",
+              "pm.test('one unit still returnable', () => pm.expect(d.lines[0].returnableQuantity).to.eql(1));"
+            ], "type": "text/javascript" }
+          }],
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/orders/{{orderId}}", "host": ["{{baseUrl}}"], "path": ["orders", "{{orderId}}"] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "8. Inventory (admin & staff)",
+      "description": "Uses `{{adminToken}}`. Customers deliberately have no access: exact stock counts are competitive intelligence.",
+      "item": [
+        {
+          "name": "Availability for one SKU  ⭐",
+          "event": [{
+            "listen": "test",
+            "script": { "exec": [
+              "const d = pm.response.json().data;",
+              "pm.test('available is derived, never stored', () => pm.expect(d.totalAvailable).to.eql(d.totalOnHand - d.totalReserved));"
+            ], "type": "text/javascript" }
+          }],
+          "request": {
+            "auth": { "type": "bearer", "bearer": [{ "key": "token", "value": "{{adminToken}}" }] },
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/inventory/variants/9", "host": ["{{baseUrl}}"], "path": ["inventory", "variants", "9"] },
+            "description": "Variant 9 (`TEE-BLK-M`) is seeded with exactly **one** unit network-wide — 1 at Mumbai, 0 at Delhi. That is the oversell demo SKU.\n\n`available` is always derived as `on_hand - reserved`. A stored availability column would be a second source of truth that drifts under concurrency, and the drift *is* the oversell."
+          }
+        },
+        {
+          "name": "Search stock rows",
+          "request": {
+            "auth": { "type": "bearer", "bearer": [{ "key": "token", "value": "{{adminToken}}" }] },
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/inventory?variantId=4",
+              "host": ["{{baseUrl}}"], "path": ["inventory"],
+              "query": [
+                { "key": "variantId", "value": "4" },
+                { "key": "warehouseId", "value": "1", "disabled": true }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Set an absolute level (stock-take)",
+          "request": {
+            "auth": { "type": "bearer", "bearer": [{ "key": "token", "value": "{{adminToken}}" }] },
+            "method": "PUT",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"variantId\": 4,\n  \"warehouseId\": 1,\n  \"onHand\": 40,\n  \"reorderLevel\": 10,\n  \"reference\": \"STOCKTAKE-2026-09\"\n}" },
+            "url": { "raw": "{{baseUrl}}/admin/inventory", "host": ["{{baseUrl}}"], "path": ["admin", "inventory"] },
+            "description": "Refused with 422 if the new level is below units already reserved for open orders — those belong to customers with confirmed orders, and silently invalidating them would trade a visible error for an invisible one."
+          }
+        },
+        {
+          "name": "Relative adjustment",
+          "request": {
+            "auth": { "type": "bearer", "bearer": [{ "key": "token", "value": "{{adminToken}}" }] },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"variantId\": 4,\n  \"warehouseId\": 1,\n  \"quantityDelta\": 12,\n  \"reference\": \"GRN-4471\",\n  \"note\": \"Supplier delivery received\"\n}" },
+            "url": { "raw": "{{baseUrl}}/admin/inventory/adjustments", "host": ["{{baseUrl}}"], "path": ["admin", "inventory", "adjustments"] },
+            "description": "Safe to apply concurrently with another adjustment, unlike an absolute set — two people each setting the level from a stale reading would lose one of the changes."
+          }
+        },
+        {
+          "name": "Movement ledger",
+          "request": {
+            "auth": { "type": "bearer", "bearer": [{ "key": "token", "value": "{{adminToken}}" }] },
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/inventory/8/ledger", "host": ["{{baseUrl}}"], "path": ["inventory", "8", "ledger"] },
+            "description": "Append-only: every reserve, release, expiry, sale, restock, and adjustment, each recording the resulting `onHandAfter` and `reservedAfter`. This is how a stock discrepancy is bisected to the movement that caused it."
+          }
+        },
+        {
+          "name": "Low-stock report",
+          "request": {
+            "auth": { "type": "bearer", "bearer": [{ "key": "token", "value": "{{adminToken}}" }] },
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/inventory/low-stock", "host": ["{{baseUrl}}"], "path": ["inventory", "low-stock"] }
+          }
+        },
+        {
+          "name": "Warehouses",
+          "request": {
+            "auth": { "type": "bearer", "bearer": [{ "key": "token", "value": "{{adminToken}}" }] },
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/warehouses", "host": ["{{baseUrl}}"], "path": ["warehouses"] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "9. Admin — Catalog & Pricing",
+      "item": [
+        {
+          "name": "Create a category",
+          "request": {
+            "auth": { "type": "bearer", "bearer": [{ "key": "token", "value": "{{adminToken}}" }] },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"name\": \"Wearables\",\n  \"slug\": \"wearables\",\n  \"parentId\": 1\n}" },
+            "url": { "raw": "{{baseUrl}}/admin/categories", "host": ["{{baseUrl}}"], "path": ["admin", "categories"] },
+            "description": "Re-parenting a category under its own descendant is refused. Deleting one with children or products is refused with 422 rather than cascading and orphaning rows."
+          }
+        },
+        {
+          "name": "Create a product with a variant",
+          "request": {
+            "auth": { "type": "bearer", "bearer": [{ "key": "token", "value": "{{adminToken}}" }] },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"name\": \"Aurora Watch SE\",\n  \"description\": \"1.8-inch AMOLED, 14-day battery.\",\n  \"brand\": \"Aurora\",\n  \"categoryId\": 1,\n  \"variants\": [\n    {\n      \"sku\": \"AUR-WATCH-SE-BLK\",\n      \"variantName\": \"Black\",\n      \"price\": 12999.00,\n      \"weightGrams\": 48\n    }\n  ]\n}" },
+            "url": { "raw": "{{baseUrl}}/admin/products", "host": ["{{baseUrl}}"], "path": ["admin", "products"] },
+            "description": "The variant is the priced, stocked unit, which is why inventory keys on variant rather than product.\n\nDELETE archives rather than removing: order lines still dereference the variant for returns and reporting."
+          }
+        },
+        {
+          "name": "List products (incl. archived)",
+          "request": {
+            "auth": { "type": "bearer", "bearer": [{ "key": "token", "value": "{{adminToken}}" }] },
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/admin/products", "host": ["{{baseUrl}}"], "path": ["admin", "products"] }
+          }
+        },
+        {
+          "name": "List coupons",
+          "request": {
+            "auth": { "type": "bearer", "bearer": [{ "key": "token", "value": "{{adminToken}}" }] },
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/admin/discounts", "host": ["{{baseUrl}}"], "path": ["admin", "discounts"] },
+            "description": "Admin-only. Customers apply a coupon by code but can never enumerate the table, which would hand out every unadvertised promotion."
+          }
+        },
+        {
+          "name": "Create a coupon",
+          "request": {
+            "auth": { "type": "bearer", "bearer": [{ "key": "token", "value": "{{adminToken}}" }] },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"code\": \"WELCOME15\",\n  \"description\": \"15% off your first order, capped at Rs.750\",\n  \"type\": \"PERCENTAGE_OFF\",\n  \"discountValue\": 15.0,\n  \"maxDiscount\": 750.00,\n  \"minOrderValue\": 999.00,\n  \"startsAt\": \"2026-01-01T00:00:00Z\",\n  \"endsAt\": \"2027-01-01T00:00:00Z\",\n  \"usageLimit\": 1000,\n  \"perCustomerLimit\": 1\n}" },
+            "url": { "raw": "{{baseUrl}}/admin/discounts", "host": ["{{baseUrl}}"], "path": ["admin", "discounts"] },
+            "description": "`PERCENTAGE_OFF` (`discountValue` is a percentage, optionally capped) or `FLAT_AMOUNT_OFF` (an absolute amount, clamped to the basket so a total can never go negative).\n\nSet `categoryId` to restrict to that category **and its descendants**. One coupon per order — stacking is out of scope and enforced by a unique constraint."
+          }
+        },
+        {
+          "name": "Tax rates",
+          "request": {
+            "auth": { "type": "bearer", "bearer": [{ "key": "token", "value": "{{adminToken}}" }] },
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/admin/tax-rates", "host": ["{{baseUrl}}"], "path": ["admin", "tax-rates"] },
+            "description": "Sparse by design. Only Electronics (0.18), Apparel (0.05), and Home (0.12) have rows; Mobiles, Audio, Men, and Women **inherit** by walking the tree upward. A new sub-category is taxed correctly the moment it is created."
+          }
+        },
+        {
+          "name": "Set a tax rate",
+          "request": {
+            "auth": { "type": "bearer", "bearer": [{ "key": "token", "value": "{{adminToken}}" }] },
+            "method": "PUT",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"categoryId\": 2,\n  \"rate\": 0.28,\n  \"description\": \"GST 28% — Mobiles\"\n}" },
+            "url": { "raw": "{{baseUrl}}/admin/tax-rates", "host": ["{{baseUrl}}"], "path": ["admin", "tax-rates"] },
+            "description": "`rate` is a **fraction**: 0.28 means 28%. Rates are never percentages, so no division by one hundred appears anywhere in the pricing code.\n\nUpsert, because a category has at most one rate."
+          }
+        }
+      ]
+    },
+    {
+      "name": "10. Admin — Operations",
+      "description": "Production observability is out of scope; this is the minimum that makes the async design defensible, because an outbox silently accumulating dead letters is worse than no outbox at all.",
+      "item": [
+        {
+          "name": "Outbox health",
+          "event": [{
+            "listen": "test",
+            "script": { "exec": [
+              "const d = pm.response.json().data;",
+              "pm.test('three handlers registered', () => pm.expect(d.registeredHandlers).to.have.lengthOf(3));",
+              "pm.test('no dead letters', () => pm.expect(d.deadLetter).to.eql(0));"
+            ], "type": "text/javascript" }
+          }],
+          "request": {
+            "auth": { "type": "bearer", "bearer": [{ "key": "token", "value": "{{adminToken}}" }] },
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/admin/outbox/stats", "host": ["{{baseUrl}}"], "path": ["admin", "outbox", "stats"] },
+            "description": "Counts by status plus the registered handlers: `fulfillment-routing`, `customer-notification`, `audit-trail`. A non-zero `deadLetter` count is the signal that downstream work has been abandoned and needs a human."
+          }
+        },
+        {
+          "name": "Dead letters",
+          "request": {
+            "auth": { "type": "bearer", "bearer": [{ "key": "token", "value": "{{adminToken}}" }] },
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/admin/outbox/dead-letters", "host": ["{{baseUrl}}"], "path": ["admin", "outbox", "dead-letters"] },
+            "description": "Each row carries `attempts` and `lastError`, naming the handler that failed. A poison event is visible here rather than silently discarded."
+          }
+        },
+        {
+          "name": "Redeliver an event",
+          "request": {
+            "auth": { "type": "bearer", "bearer": [{ "key": "token", "value": "{{adminToken}}" }] },
+            "method": "POST",
+            "url": { "raw": "{{baseUrl}}/admin/outbox/1/redeliver", "host": ["{{baseUrl}}"], "path": ["admin", "outbox", "1", "redeliver"] },
+            "description": "Re-runs only the handlers that have not yet succeeded. Handlers that already completed are skipped via the `(event, handler)` execution marker, so redelivery cannot duplicate a notification or a shipment."
+          }
+        },
+        {
+          "name": "Audit trail for an order  ⭐",
+          "event": [{
+            "listen": "test",
+            "script": { "exec": [
+              "const rows = pm.response.json().data.content;",
+              "pm.test('history recorded', () => pm.expect(rows).to.not.be.empty);",
+              "pm.test('each row carries a traceId', () => pm.expect(rows[0].traceId).to.be.a('string').and.not.empty);"
+            ], "type": "text/javascript" }
+          }],
+          "request": {
+            "auth": { "type": "bearer", "bearer": [{ "key": "token", "value": "{{adminToken}}" }] },
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/admin/audit-events/Order/{{orderId}}", "host": ["{{baseUrl}}"], "path": ["admin", "audit-events", "Order", "{{orderId}}"] },
+            "description": "Every status change, cancellation, and return, newest first.\n\nEach row carries the `traceId` of the request that caused it — **including rows written asynchronously minutes later**, because MDC is propagated across the thread hand-off. An audit entry therefore leads straight to the full log context."
+          }
+        },
+        {
+          "name": "Search the audit trail",
+          "request": {
+            "auth": { "type": "bearer", "bearer": [{ "key": "token", "value": "{{adminToken}}" }] },
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/admin/audit-events?entityType=Order",
+              "host": ["{{baseUrl}}"], "path": ["admin", "audit-events"],
+              "query": [
+                { "key": "entityType", "value": "Order" },
+                { "key": "action", "value": "ORDER_PLACED", "disabled": true }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Unconfirmed payments (reconciliation)",
+          "request": {
+            "auth": { "type": "bearer", "bearer": [{ "key": "token", "value": "{{adminToken}}" }] },
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/admin/payments/unconfirmed", "host": ["{{baseUrl}}"], "path": ["admin", "payments", "unconfirmed"] },
+            "description": "The queue an operator checks against the provider's records after a gateway timeout. Run **4. Checkout → unknown outcome** first to populate it.\n\nIn a production build this is where a webhook or reconciliation job would settle these rows."
+          }
+        },
+        {
+          "name": "All orders",
+          "request": {
+            "auth": { "type": "bearer", "bearer": [{ "key": "token", "value": "{{adminToken}}" }] },
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/admin/orders",
+              "host": ["{{baseUrl}}"], "path": ["admin", "orders"],
+              "query": [{ "key": "status", "value": "AWAITING_PAYMENT", "disabled": true }]
+            },
+            "description": "Filter by `status=AWAITING_PAYMENT` to spot checkouts that never settled."
+          }
+        }
+      ]
+    },
+    {
+      "name": "11. Access Control",
+      "description": "Two distinct concerns, which fail in different ways: **role** checks return 403; **ownership** checks return **404**, because a 403 confirms the resource exists and enables enumeration.",
+      "item": [
+        {
+          "name": "Customer → admin endpoint (403)",
+          "event": [{
+            "listen": "test",
+            "script": { "exec": [
+              "pm.test('403 FORBIDDEN', () => {",
+              "  pm.response.to.have.status(403);",
+              "  pm.expect(pm.response.json().code).to.eql('FORBIDDEN');",
+              "});"
+            ], "type": "text/javascript" }
+          }],
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/admin/orders", "host": ["{{baseUrl}}"], "path": ["admin", "orders"] }
+          }
+        },
+        {
+          "name": "Staff → cart (403)",
+          "event": [{
+            "listen": "test",
+            "script": { "exec": ["pm.test('403', () => pm.response.to.have.status(403));"], "type": "text/javascript" }
+          }],
+          "request": {
+            "auth": { "type": "bearer", "bearer": [{ "key": "token", "value": "{{staffToken}}" }] },
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/cart", "host": ["{{baseUrl}}"], "path": ["cart"] },
+            "description": "Staff cannot shop."
+          }
+        },
+        {
+          "name": "Staff CAN read stock (200)",
+          "event": [{
+            "listen": "test",
+            "script": { "exec": ["pm.test('200 — needed to pick an order', () => pm.response.to.have.status(200));"], "type": "text/javascript" }
+          }],
+          "request": {
+            "auth": { "type": "bearer", "bearer": [{ "key": "token", "value": "{{staffToken}}" }] },
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/inventory", "host": ["{{baseUrl}}"], "path": ["inventory"] }
+          }
+        },
+        {
+          "name": "Staff writing stock (403)",
+          "event": [{
+            "listen": "test",
+            "script": { "exec": ["pm.test('403 — staff could otherwise manufacture availability', () => pm.response.to.have.status(403));"], "type": "text/javascript" }
+          }],
+          "request": {
+            "auth": { "type": "bearer", "bearer": [{ "key": "token", "value": "{{staffToken}}" }] },
+            "method": "PUT",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"variantId\": 4,\n  \"warehouseId\": 1,\n  \"onHand\": 9999\n}" },
+            "url": { "raw": "{{baseUrl}}/admin/inventory", "host": ["{{baseUrl}}"], "path": ["admin", "inventory"] }
+          }
+        },
+        {
+          "name": "No token (401)",
+          "event": [{
+            "listen": "test",
+            "script": { "exec": [
+              "pm.test('401', () => pm.response.to.have.status(401));",
+              "pm.test('same error contract as everything else', () => {",
+              "  const b = pm.response.json();",
+              "  pm.expect(b.code).to.eql('UNAUTHENTICATED');",
+              "  pm.expect(b).to.have.property('traceId');",
+              "});",
+              "pm.test('X-Trace-Id header present even on filter-chain failures', () => pm.expect(pm.response.headers.get('X-Trace-Id')).to.not.be.empty);"
+            ], "type": "text/javascript" }
+          }],
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/orders", "host": ["{{baseUrl}}"], "path": ["orders"] }
+          }
+        },
+        {
+          "name": "Cross-customer order read (404, not 403)  ⭐",
+          "event": [{
+            "listen": "test",
+            "script": { "exec": [
+              "pm.test('404, not 403', () => pm.response.to.have.status(404));",
+              "pm.test('NOT_FOUND — does not confirm the order exists', () => pm.expect(pm.response.json().code).to.eql('NOT_FOUND'));"
+            ], "type": "text/javascript" }
+          }],
+          "request": {
+            "auth": { "type": "bearer", "bearer": [{ "key": "token", "value": "{{otherCustomerToken}}" }] },
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/orders/{{orderId}}", "host": ["{{baseUrl}}"], "path": ["orders", "{{orderId}}"] },
+            "description": "Run **1. Authentication → Login (second customer)** first.\n\n**This is the check a role-only security model gets wrong**, and it is the most common data leak in commerce APIs. Ownership is enforced *in the query*, so a future caller cannot forget it, and the response deliberately does not distinguish \"not yours\" from \"does not exist\"."
+          }
+        },
+        {
+          "name": "Validation errors are per-field (400)",
+          "event": [{
+            "listen": "test",
+            "script": { "exec": [
+              "pm.test('400 VALIDATION_FAILED', () => {",
+              "  pm.response.to.have.status(400);",
+              "  pm.expect(pm.response.json().code).to.eql('VALIDATION_FAILED');",
+              "});",
+              "pm.test('details name the offending fields', () => pm.expect(pm.response.json().details).to.not.be.empty);"
+            ], "type": "text/javascript" }
+          }],
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"email\": \"not-an-email\",\n  \"password\": \"short\",\n  \"fullName\": \"\"\n}" },
+            "url": { "raw": "{{baseUrl}}/auth/register", "host": ["{{baseUrl}}"], "path": ["auth", "register"] }
+          }
+        },
+        {
+          "name": "Login failures do not leak account existence",
+          "event": [{
+            "listen": "test",
+            "script": { "exec": [
+              "pm.test('401', () => pm.response.to.have.status(401));",
+              "pm.test('generic message — no enumeration oracle', () => pm.expect(pm.response.json().code).to.eql('INVALID_CREDENTIALS'));"
+            ], "type": "text/javascript" }
+          }],
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"email\": \"nobody-here@example.com\",\n  \"password\": \"{{password}}\"\n}" },
+            "url": { "raw": "{{baseUrl}}/auth/login", "host": ["{{baseUrl}}"], "path": ["auth", "login"] },
+            "description": "Unknown email and wrong password return an identical response. Distinguishing them would turn the endpoint into an account enumeration oracle."
+          }
+        }
+      ]
+    }
+  ]
+}

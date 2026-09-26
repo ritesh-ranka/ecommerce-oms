@@ -1,0 +1,553 @@
+###############################################################################
+# E-commerce Order Management — runnable walkthrough
+#
+# Works in IntelliJ HTTP Client and the VS Code REST Client extension.
+# Start the app first:  mvn spring-boot:run
+#
+# Run the requests top to bottom. Tokens and ids are captured automatically,
+# so nothing needs pasting by hand.
+#
+# Scenario A  happy path: browse -> cart -> preview -> checkout -> fulfil -> return -> refund
+# Scenario B  idempotency: the same key twice
+# Scenario C  payment failures: declined, and unknown-outcome with self-healing
+# Scenario D  oversell: a SKU with exactly one unit
+# Scenario E  admin: catalog, stock, coupons, operations
+###############################################################################
+
+@host = http://localhost:8080
+@api = {{host}}/api/v1
+
+###############################################################################
+# SCENARIO A — the happy path
+###############################################################################
+
+### A1. Log in as a customer
+# @name customerLogin
+POST {{api}}/auth/login
+Content-Type: application/json
+
+{ "email": "customer@oms.dev", "password": "Password@123" }
+
+> {% client.global.set("customerToken", response.body.data.accessToken); %}
+
+### A2. Who am I?
+GET {{api}}/auth/me
+Authorization: Bearer {{customerToken}}
+
+### A3. Browse the Audio category — no token needed
+GET {{api}}/products?categorySlug=audio&size=5
+
+### A4. Product detail. `variants[].id` is what the cart expects.
+GET {{api}}/products/3
+
+### A5. Add 2 x Nimbus Buds Pro (variant 4, 7999.00 each)
+POST {{api}}/cart/items
+Authorization: Bearer {{customerToken}}
+Content-Type: application/json
+
+{ "variantId": 4, "quantity": 2 }
+
+### A6. Read the cart
+# Note the cart holds no prices and reserves no stock: check A7 for real numbers,
+# and note availability in E4 is unchanged by having items in a basket.
+GET {{api}}/cart
+Authorization: Bearer {{customerToken}}
+
+### A7. Preview with a coupon — the interesting call
+#
+#   subtotal  15998.00   2 x 7999.00
+#   discount    500.00   SAVE10 is 10% (1599.80) but CAPS at 500.00
+#   tax        2789.64   18% of 15498.00 — the POST-discount base
+#   shipping      0.00   free above 999.00 post-discount
+#   total     18287.64
+#
+# Also note lines[0].lineDiscount: the coupon apportioned down to the line,
+# which is what makes a correct partial refund computable later (A15).
+POST {{api}}/cart/preview
+Authorization: Bearer {{customerToken}}
+Content-Type: application/json
+
+{ "couponCode": "SAVE10", "destinationZone": "WEST" }
+
+### A8. Place the order. `Idempotency-Key` is required.
+# The response total is EXACTLY the previewed total — both run one pricing engine.
+# @name checkout
+POST {{api}}/checkout
+Authorization: Bearer {{customerToken}}
+Content-Type: application/json
+Idempotency-Key: demo-happy-path-0001
+
+{
+  "shippingAddress": {
+    "recipientName": "Cara Customer",
+    "line1": "42 Marine Drive, Flat 9B",
+    "city": "Mumbai",
+    "zone": "WEST",
+    "postalCode": "400020",
+    "phone": "9000000002"
+  },
+  "paymentMethod": "CARD",
+  "paymentToken": "tok_success",
+  "couponCode": "SAVE10"
+}
+
+> {%
+  client.global.set("orderId", response.body.data.orderId);
+  client.global.set("orderNumber", response.body.data.orderNumber);
+%}
+
+### A9. The async pipeline already ran — after the response was returned
+GET {{api}}/notifications
+Authorization: Bearer {{customerToken}}
+
+### A10. The order, with money breakdown and `allowedNextStatuses`
+GET {{api}}/orders/{{orderId}}
+Authorization: Bearer {{customerToken}}
+
+### A11. Log in as Mumbai warehouse staff
+POST {{api}}/auth/login
+Content-Type: application/json
+
+{ "email": "staff.mum@oms.dev", "password": "Password@123" }
+
+> {% client.global.set("staffToken", response.body.data.accessToken); %}
+
+### A12. The work queue — these shipments were created asynchronously
+GET {{api}}/fulfillment/queue?status=PENDING
+Authorization: Bearer {{staffToken}}
+
+### A13. Find this order's parcel
+# @name shipments
+GET {{api}}/fulfillment/orders/{{orderId}}/shipments
+Authorization: Bearer {{staffToken}}
+
+> {% client.global.set("shipmentId", response.body.data[0].id); %}
+
+### A14a. Pack it — the order follows to PACKED
+POST {{api}}/fulfillment/shipments/{{shipmentId}}/status
+Authorization: Bearer {{staffToken}}
+Content-Type: application/json
+
+{ "status": "PACKED" }
+
+### A14b. Ship it — a tracking number is minted here
+POST {{api}}/fulfillment/shipments/{{shipmentId}}/status
+Authorization: Bearer {{staffToken}}
+Content-Type: application/json
+
+{ "status": "SHIPPED" }
+
+### A14c. Deliver it — starts the return window
+POST {{api}}/fulfillment/shipments/{{shipmentId}}/status
+Authorization: Bearer {{staffToken}}
+Content-Type: application/json
+
+{ "status": "DELIVERED" }
+
+### A14d. Cancelling now is refused: the goods are with a carrier
+# Expect 409 ILLEGAL_TRANSITION, naming DELIVERED as the allowed move.
+POST {{api}}/orders/{{orderId}}/cancel
+Authorization: Bearer {{customerToken}}
+Content-Type: application/json
+
+{ "reason": "too late" }
+
+### A15. Grab the order line id, then request a PARTIAL return (1 of 2)
+# @name orderForReturn
+GET {{api}}/orders/{{orderId}}
+Authorization: Bearer {{customerToken}}
+
+> {% client.global.set("orderLineId", response.body.data.lines[0].orderLineId); %}
+
+### A16. Request the return
+# totalRefund is 9143.82 — half of the 18287.64 actually PAID, with the discount
+# share and tax both reversed. Half the list price would be 7999.00.
+# Nothing is refunded or restocked yet.
+# @name returnRequest
+POST {{api}}/orders/{{orderId}}/returns
+Authorization: Bearer {{customerToken}}
+Content-Type: application/json
+
+{
+  "reason": "SIZE_MISMATCH",
+  "comment": "Ordered medium, needed large",
+  "lines": [ { "orderLineId": {{orderLineId}}, "quantity": 1 } ]
+}
+
+> {% client.global.set("returnId", response.body.data.id); %}
+
+### A17. Staff review queue
+GET {{api}}/returns/pending
+Authorization: Bearer {{staffToken}}
+
+### A18. Approve: refund, then restock to the warehouse that shipped it
+# The order returns to DELIVERED (not RETURNED) because one unit is still out,
+# and payment becomes PARTIALLY_REFUNDED.
+POST {{api}}/returns/{{returnId}}/approve
+Authorization: Bearer {{staffToken}}
+Content-Type: application/json
+
+{ "note": "Goods received in original packaging" }
+
+### A19. Confirm: refundedTotal set, returnedQuantity 1, returnableQuantity 1
+GET {{api}}/orders/{{orderId}}
+Authorization: Bearer {{customerToken}}
+
+###############################################################################
+# SCENARIO B — idempotency
+###############################################################################
+
+### B1. Add an item
+POST {{api}}/cart/items
+Authorization: Bearer {{customerToken}}
+Content-Type: application/json
+
+{ "variantId": 4, "quantity": 1 }
+
+### B2. Check out with a fixed key
+# @name idemFirst
+POST {{api}}/checkout
+Authorization: Bearer {{customerToken}}
+Content-Type: application/json
+Idempotency-Key: demo-idempotency-0002
+
+{
+  "shippingAddress": { "recipientName": "Cara Customer", "line1": "42 Marine Drive",
+                       "city": "Mumbai", "zone": "WEST", "postalCode": "400020", "phone": "9000000002" },
+  "paymentMethod": "CARD",
+  "paymentToken": "tok_success"
+}
+
+### B3. Send the IDENTICAL request again
+# Same order id, same 201, header `Idempotent-Replay: true`, and ONE charge.
+# No second order, no second unit of stock consumed.
+POST {{api}}/checkout
+Authorization: Bearer {{customerToken}}
+Content-Type: application/json
+Idempotency-Key: demo-idempotency-0002
+
+{
+  "shippingAddress": { "recipientName": "Cara Customer", "line1": "42 Marine Drive",
+                       "city": "Mumbai", "zone": "WEST", "postalCode": "400020", "phone": "9000000002" },
+  "paymentMethod": "CARD",
+  "paymentToken": "tok_success"
+}
+
+### B4. Same key, DIFFERENT body -> 422 IDEMPOTENCY_KEY_REUSED
+# Replaying here would hand back an answer to a question nobody asked.
+POST {{api}}/checkout
+Authorization: Bearer {{customerToken}}
+Content-Type: application/json
+Idempotency-Key: demo-idempotency-0002
+
+{
+  "shippingAddress": { "recipientName": "Someone Else", "line1": "1 Other Road",
+                       "city": "Delhi", "zone": "NORTH", "postalCode": "110001", "phone": "9000000005" },
+  "paymentMethod": "UPI",
+  "paymentToken": "tok_success",
+  "couponCode": "SAVE10"
+}
+
+### B5. No key at all -> 400 VALIDATION_FAILED
+POST {{api}}/checkout
+Authorization: Bearer {{customerToken}}
+Content-Type: application/json
+
+{
+  "shippingAddress": { "recipientName": "Cara", "line1": "42 Marine Drive",
+                       "city": "Mumbai", "zone": "WEST", "postalCode": "400020", "phone": "9000000002" },
+  "paymentMethod": "CARD",
+  "paymentToken": "tok_success"
+}
+
+###############################################################################
+# SCENARIO C — payment failures
+###############################################################################
+
+### C1. Add an item
+POST {{api}}/cart/items
+Authorization: Bearer {{customerToken}}
+Content-Type: application/json
+
+{ "variantId": 5, "quantity": 1 }
+
+### C2. DECLINED -> 402. Stock released, order kept as PAYMENT_FAILED.
+# A decline is final, so the hold goes straight back. The order is kept rather
+# than deleted so the customer sees the attempt in their history.
+POST {{api}}/checkout
+Authorization: Bearer {{customerToken}}
+Content-Type: application/json
+Idempotency-Key: demo-decline-0003
+
+{
+  "shippingAddress": { "recipientName": "Cara", "line1": "42 Marine Drive",
+                       "city": "Mumbai", "zone": "WEST", "postalCode": "400020", "phone": "9000000002" },
+  "paymentMethod": "CARD",
+  "paymentToken": "tok_decline"
+}
+
+### C3. Retry with the SAME key after the decline -> allowed, and succeeds
+# A failed attempt releases the claim, so a transient decline does not lock the
+# customer out permanently.
+POST {{api}}/checkout
+Authorization: Bearer {{customerToken}}
+Content-Type: application/json
+Idempotency-Key: demo-decline-0003
+
+{
+  "shippingAddress": { "recipientName": "Cara", "line1": "42 Marine Drive",
+                       "city": "Mumbai", "zone": "WEST", "postalCode": "400020", "phone": "9000000002" },
+  "paymentMethod": "CARD",
+  "paymentToken": "tok_success"
+}
+
+### C4. Add another item for the timeout case
+POST {{api}}/cart/items
+Authorization: Bearer {{customerToken}}
+Content-Type: application/json
+
+{ "variantId": 6, "quantity": 1 }
+
+### C5. UNKNOWN OUTCOME -> 502, with `retrySafe: true`
+# The hold is deliberately RETAINED: the charge may have succeeded, and releasing
+# could sell units the customer already paid for. Payment -> UNCONFIRMED,
+# order stays AWAITING_PAYMENT.
+POST {{api}}/checkout
+Authorization: Bearer {{customerToken}}
+Content-Type: application/json
+Idempotency-Key: demo-timeout-0004
+
+{
+  "shippingAddress": { "recipientName": "Cara", "line1": "42 Marine Drive",
+                       "city": "Mumbai", "zone": "WEST", "postalCode": "400020", "phone": "9000000002" },
+  "paymentMethod": "CARD",
+  "paymentToken": "tok_timeout"
+}
+
+### C6. Log in as admin
+POST {{api}}/auth/login
+Content-Type: application/json
+
+{ "email": "admin@oms.dev", "password": "Password@123" }
+
+> {% client.global.set("adminToken", response.body.data.accessToken); %}
+
+### C7. The reconciliation queue — the UNCONFIRMED payment is visible, not buried
+GET {{api}}/admin/payments/unconfirmed
+Authorization: Bearer {{adminToken}}
+
+### C8. Orders still awaiting payment
+# The default reservation TTL is 15 minutes. Wait it out (or shorten
+# oms.inventory.reservation-ttl) and this order self-heals: the sweeper returns
+# the stock and cancels the order. PaymentFailureIT proves this automatically.
+GET {{api}}/admin/orders?status=AWAITING_PAYMENT
+Authorization: Bearer {{adminToken}}
+
+###############################################################################
+# SCENARIO D — oversell prevention
+###############################################################################
+
+### D1. Variant 9 (TEE-BLK-M) is seeded with exactly ONE unit network-wide
+# 1 at Mumbai, 0 at Delhi. `available` is always derived as on_hand - reserved.
+GET {{api}}/inventory/variants/9
+Authorization: Bearer {{adminToken}}
+
+### D2. Ask for 3 of the 1 available -> 409 with a per-SKU shortfall breakdown
+POST {{api}}/cart/items
+Authorization: Bearer {{customerToken}}
+Content-Type: application/json
+
+{ "variantId": 9, "quantity": 3 }
+
+### D3. Attempt checkout
+# Expect 409 INSUFFICIENT_STOCK with details: sku / requested / available.
+# Nothing is held — TX-1 rolled back entirely.
+POST {{api}}/checkout
+Authorization: Bearer {{customerToken}}
+Content-Type: application/json
+Idempotency-Key: demo-oversell-0005
+
+{
+  "shippingAddress": { "recipientName": "Cara", "line1": "42 Marine Drive",
+                       "city": "Mumbai", "zone": "WEST", "postalCode": "400020", "phone": "9000000002" },
+  "paymentMethod": "CARD",
+  "paymentToken": "tok_success"
+}
+
+### D4. Availability unchanged — a failed checkout leaks nothing
+GET {{api}}/inventory/variants/9
+Authorization: Bearer {{adminToken}}
+
+### D5. Tidy up
+DELETE {{api}}/cart
+Authorization: Bearer {{customerToken}}
+
+# For the real proof, 50 simultaneous checkouts against this one unit:
+#   mvn verify -Dit.test=OversellPreventionIT -Dtest=MoneyTest
+
+###############################################################################
+# SCENARIO E — admin
+###############################################################################
+
+### E1. Category tree
+GET {{api}}/categories
+
+### E2. Create a category
+POST {{api}}/admin/categories
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{ "name": "Wearables", "slug": "wearables", "parentId": 1 }
+
+### E3. Create a product with a variant
+POST {{api}}/admin/products
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{
+  "name": "Aurora Watch SE",
+  "description": "1.8-inch AMOLED, 14-day battery.",
+  "brand": "Aurora",
+  "categoryId": 1,
+  "variants": [
+    { "sku": "AUR-WATCH-SE-BLK", "variantName": "Black", "price": 12999.00, "weightGrams": 48 }
+  ]
+}
+
+### E4. Stock rows across warehouses
+GET {{api}}/inventory?variantId=4
+Authorization: Bearer {{adminToken}}
+
+### E5. Set an absolute level (stock-take)
+# Refused with 422 if below units already reserved for open orders.
+PUT {{api}}/admin/inventory
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{ "variantId": 4, "warehouseId": 1, "onHand": 40, "reorderLevel": 10, "reference": "STOCKTAKE-2026-09" }
+
+### E6. Relative correction — safe to apply concurrently, unlike an absolute set
+POST {{api}}/admin/inventory/adjustments
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{ "variantId": 4, "warehouseId": 1, "quantityDelta": 12, "reference": "GRN-4471",
+  "note": "Supplier delivery received" }
+
+### E7. Movement ledger for one stock row (inventory item 8 = variant 4 @ WH-MUM)
+GET {{api}}/inventory/8/ledger
+Authorization: Bearer {{adminToken}}
+
+### E8. Low-stock report
+GET {{api}}/inventory/low-stock
+Authorization: Bearer {{adminToken}}
+
+### E9. Coupons with their redemption counters
+GET {{api}}/admin/discounts
+Authorization: Bearer {{adminToken}}
+
+### E10. Create a coupon
+POST {{api}}/admin/discounts
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{
+  "code": "WELCOME15",
+  "description": "15% off your first order, capped at Rs.750",
+  "type": "PERCENTAGE_OFF",
+  "discountValue": 15.0,
+  "maxDiscount": 750.00,
+  "minOrderValue": 999.00,
+  "startsAt": "2026-01-01T00:00:00Z",
+  "endsAt": "2027-01-01T00:00:00Z",
+  "usageLimit": 1000,
+  "perCustomerLimit": 1
+}
+
+### E11. Tax rates — sparse by design; gaps inherit from an ancestor
+GET {{api}}/admin/tax-rates
+Authorization: Bearer {{adminToken}}
+
+### E12. Set a rate. `rate` is a FRACTION: 0.28 means 28%.
+PUT {{api}}/admin/tax-rates
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{ "categoryId": 2, "rate": 0.28, "description": "GST 28% — Mobiles" }
+
+### E13. Outbox health. A non-zero deadLetter count needs a human.
+GET {{api}}/admin/outbox/stats
+Authorization: Bearer {{adminToken}}
+
+### E14. Dead letters, with attempts and lastError
+GET {{api}}/admin/outbox/dead-letters
+Authorization: Bearer {{adminToken}}
+
+### E15. Full audit history for the order from Scenario A
+# Every row carries the traceId of the request that caused it — including rows
+# written asynchronously minutes later.
+GET {{api}}/admin/audit-events/Order/{{orderId}}
+Authorization: Bearer {{adminToken}}
+
+### E16. All orders
+GET {{api}}/admin/orders
+Authorization: Bearer {{adminToken}}
+
+###############################################################################
+# SCENARIO F — access control
+###############################################################################
+
+### F1. Customer hitting an admin endpoint -> 403
+GET {{api}}/admin/orders
+Authorization: Bearer {{customerToken}}
+
+### F2. Staff trying to shop -> 403
+GET {{api}}/cart
+Authorization: Bearer {{staffToken}}
+
+### F3. Staff CAN read stock (needed to pick), but cannot write it
+GET {{api}}/inventory
+Authorization: Bearer {{staffToken}}
+
+### F4. Staff writing stock -> 403
+PUT {{api}}/admin/inventory
+Authorization: Bearer {{staffToken}}
+Content-Type: application/json
+
+{ "variantId": 4, "warehouseId": 1, "onHand": 9999 }
+
+### F5. No token -> 401, in the same error shape as everything else
+GET {{api}}/orders
+
+### F6. Another customer cannot see this order -> 404, NOT 403
+# A 403 would confirm the id exists and allow enumeration.
+POST {{api}}/auth/login
+Content-Type: application/json
+
+{ "email": "customer2@oms.dev", "password": "Password@123" }
+
+> {% client.global.set("otherCustomerToken", response.body.data.accessToken); %}
+
+### F7. The attempt
+GET {{api}}/orders/{{orderId}}
+Authorization: Bearer {{otherCustomerToken}}
+
+### F8. Validation errors are per-field in the standard envelope
+POST {{api}}/auth/register
+Content-Type: application/json
+
+{ "email": "not-an-email", "password": "short", "fullName": "" }
+
+### F9. An expired coupon returns 422 with the reason, not a silent no-op
+POST {{api}}/cart/items
+Authorization: Bearer {{customerToken}}
+Content-Type: application/json
+
+{ "variantId": 4, "quantity": 1 }
+
+### F10. Try it
+POST {{api}}/cart/preview
+Authorization: Bearer {{customerToken}}
+Content-Type: application/json
+
+{ "couponCode": "EXPIRED5" }
