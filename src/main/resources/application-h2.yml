@@ -1,0 +1,18 @@
+# Zero-setup default: in-memory H2 running in PostgreSQL compatibility mode so the
+# migrations and locking semantics behave the same as the production dialect.
+spring:
+  datasource:
+    url: jdbc:h2:mem:oms;MODE=PostgreSQL;DATABASE_TO_LOWER=TRUE;DEFAULT_LOCK_TIMEOUT=10000;DB_CLOSE_DELAY=-1
+    driver-class-name: org.h2.Driver
+    username: sa
+    password: ""
+    hikari:
+      maximum-pool-size: 30
+      minimum-idle: 5
+      pool-name: oms-hikari
+  h2:
+    console:
+      enabled: true
+      path: /h2-console
+  jpa:
+    database-platform: org.hibernate.dialect.H2Dialect

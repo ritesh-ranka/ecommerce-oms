@@ -1,0 +1,101 @@
+spring:
+  application:
+    name: ecommerce-order-management
+  profiles:
+    active: h2
+
+  jpa:
+    open-in-view: false
+    hibernate:
+      # Schema is owned by Flyway. `validate` holds every dialect to the same schema,
+      # so drift fails at startup instead of at runtime.
+      ddl-auto: validate
+      naming:
+        # Prefixes embeddable columns with the property path: Money subtotal -> subtotal_amount / subtotal_currency.
+        implicit-strategy: org.hibernate.boot.model.naming.ImplicitNamingStrategyComponentPathImpl
+    properties:
+      hibernate:
+        jdbc.time_zone: UTC
+        query.in_clause_parameter_padding: true
+        order_inserts: true
+        order_updates: true
+
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+    baseline-on-migrate: true
+
+  jackson:
+    default-property-inclusion: non_null
+    serialization:
+      write-dates-as-timestamps: false
+
+  task:
+    execution:
+      pool:
+        core-size: 4
+        max-size: 8
+        queue-capacity: 500
+
+server:
+  port: 8080
+  error:
+    include-message: always
+    include-binding-errors: always
+  servlet:
+    context-path: /
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      show-details: when-authorized
+
+springdoc:
+  swagger-ui:
+    path: /swagger-ui.html
+    operations-sorter: method
+    tags-sorter: alpha
+  api-docs:
+    path: /v3/api-docs
+
+# ---------------------------------------------------------------------------
+# Application-specific knobs. Every business constant in the system is here;
+# none are hard-coded in the domain.
+# ---------------------------------------------------------------------------
+oms:
+  security:
+    jwt:
+      # Override in any real environment (OMS_SECURITY_JWT_SECRET).
+      secret: ${OMS_JWT_SECRET:zH8sJ2mQ1pVn4xTr7yWc0bLk5gFd3aSe9uYi6oPq2zX1cVb8nM4kJ7hG5fD3sA1q}
+      issuer: ecommerce-oms
+      access-token-ttl: PT12H
+  inventory:
+    reservation-ttl: PT15M
+    sweeper-interval-ms: 60000
+    allocation-strategy: SINGLE_WAREHOUSE_FIRST   # or SPLIT_ACROSS_WAREHOUSES
+    max-optimistic-retries: 3
+  pricing:
+    currency: INR
+    default-tax-rate: 0.18
+    flat-shipping-fee: 49.00
+    free-shipping-threshold: 999.00
+  returns:
+    window-days: 7
+  outbox:
+    retry-interval-ms: 30000
+    max-attempts: 5
+    stale-after: PT1M
+  idempotency:
+    retention: PT24H
+
+logging:
+  level:
+    root: INFO
+    com.ecommerce.oms: DEBUG
+    org.springframework.web: INFO
+    org.hibernate.SQL: INFO
+    org.flywaydb: INFO

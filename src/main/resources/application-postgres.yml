@@ -1,0 +1,15 @@
+# The "swap later" switch: mvn spring-boot:run -Dspring-boot.run.profiles=postgres
+# Works unchanged because the Flyway migrations are vendor-neutral SQL and all locking
+# goes through JPA LockModeType, which both dialects render natively.
+spring:
+  datasource:
+    url: ${OMS_DB_URL:jdbc:postgresql://localhost:5432/oms}
+    driver-class-name: org.postgresql.Driver
+    username: ${OMS_DB_USER:oms}
+    password: ${OMS_DB_PASSWORD:oms}
+    hikari:
+      maximum-pool-size: 30
+      minimum-idle: 5
+      pool-name: oms-hikari
+  jpa:
+    database-platform: org.hibernate.dialect.PostgreSQLDialect

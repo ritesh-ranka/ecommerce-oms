@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Every log line carries the correlation context put into MDC by RequestLoggingFilter:
+    traceId  - one id per HTTP request, also returned in the error body and the X-Trace-Id header
+    userId   - authenticated principal id, or "-" for anonymous
+  This is what makes a checkout traceable across the synchronous saga and the
+  asynchronous outbox dispatch that happens after the response was already sent.
+-->
+<configuration>
+    <include resource="org/springframework/boot/logging/logback/defaults.xml"/>
+
+    <property name="LOG_PATTERN"
+              value="%d{yyyy-MM-dd HH:mm:ss.SSS} %highlight(%-5level) [%thread] [trace=%X{traceId:--} user=%X{userId:--}] %cyan(%logger{36}) - %msg%n"/>
+
+    <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder>
+            <pattern>${LOG_PATTERN}</pattern>
+            <charset>UTF-8</charset>
+        </encoder>
+    </appender>
+
+    <appender name="FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
+        <file>logs/oms.log</file>
+        <rollingPolicy class="ch.qos.logback.core.rolling.SizeAndTimeBasedRollingPolicy">
+            <fileNamePattern>logs/oms-%d{yyyy-MM-dd}.%i.log</fileNamePattern>
+            <maxFileSize>10MB</maxFileSize>
+            <maxHistory>7</maxHistory>
+            <totalSizeCap>200MB</totalSizeCap>
+        </rollingPolicy>
+        <encoder>
+            <pattern>%d{yyyy-MM-dd HH:mm:ss.SSS} %-5level [%thread] [trace=%X{traceId:--} user=%X{userId:--}] %logger{36} - %msg%n</pattern>
+            <charset>UTF-8</charset>
+        </encoder>
+    </appender>
+
+    <!-- Business-critical loggers kept at DEBUG so a reviewer can watch the saga unfold. -->
+    <logger name="com.ecommerce.oms.order.service" level="DEBUG"/>
+    <logger name="com.ecommerce.oms.inventory.service" level="DEBUG"/>
+    <logger name="com.ecommerce.oms.pricing" level="DEBUG"/>
+    <logger name="com.ecommerce.oms.outbox" level="DEBUG"/>
+    <logger name="com.ecommerce.oms.common.web.RequestLoggingFilter" level="DEBUG"/>
+
+    <root level="INFO">
+        <appender-ref ref="CONSOLE"/>
+        <appender-ref ref="FILE"/>
+    </root>
+
+    <springProfile name="test">
+        <root level="WARN">
+            <appender-ref ref="CONSOLE"/>
+        </root>
+        <logger name="com.ecommerce.oms" level="INFO"/>
+    </springProfile>
+</configuration>
