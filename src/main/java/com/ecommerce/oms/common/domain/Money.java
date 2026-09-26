@@ -1,6 +1,8 @@
 package com.ecommerce.oms.common.domain;
 
+import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonIgnore;
+import com.fasterxml.jackson.annotation.JsonProperty;
 import jakarta.persistence.Column;
 import jakarta.persistence.Embeddable;
 
@@ -86,13 +88,32 @@ public final class Money implements Comparable<Money>, Serializable {
     }
 
     // ------------------------------------------------------------------ accessors
+    // Accessors are named amount()/currency() rather than getAmount()/getCurrency(), which reads better
+    // at the hundreds of call sites but is invisible to Jackson's default bean introspection. The explicit
+    // annotations are therefore load-bearing, not decoration: without them Money serialises as {} on every
+    // API response AND in every outbox payload.
 
+    @JsonProperty("amount")
     public BigDecimal amount() {
         return amount;
     }
 
+    @JsonProperty("currency")
     public String currency() {
         return currency;
+    }
+
+    /**
+     * Rebuilds a {@code Money} from JSON.
+     *
+     * <p>Needed because outbox payloads carry money and are deserialised by the handlers, possibly minutes
+     * later on a retry. Currency defaults rather than failing, so an older payload written before the field
+     * existed still replays.
+     */
+    @JsonCreator
+    static Money fromJson(@JsonProperty("amount") BigDecimal amount,
+                          @JsonProperty("currency") String currency) {
+        return new Money(amount, currency == null || currency.isBlank() ? DEFAULT_CURRENCY : currency);
     }
 
     // ------------------------------------------------------------------ arithmetic

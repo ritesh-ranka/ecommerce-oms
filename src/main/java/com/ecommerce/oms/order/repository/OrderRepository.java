@@ -42,6 +42,22 @@ public interface OrderRepository extends JpaRepository<Order, Long> {
     boolean existsByIdAndUserId(Long id, Long userId);
 
     /**
+     * Orders in a given status containing a given SKU.
+     *
+     * <p>A projection rather than a fetch: the concurrency test needs this count without loading order
+     * graphs, and a {@code findAll()} plus stream would either touch a lazy collection outside a session
+     * or pull every order into memory.
+     */
+    @Query("""
+            select count(distinct o.id) from Order o
+            join o.lines l
+            where o.status = :status
+              and l.variant.id = :variantId
+            """)
+    long countByStatusContainingVariant(@Param("status") OrderStatus status,
+                                        @Param("variantId") Long variantId);
+
+    /**
      * Orders stuck awaiting payment past the reservation TTL.
      *
      * <p>Used as a backstop alongside {@code ReservationExpiredEvent}: if an order's holds expired
