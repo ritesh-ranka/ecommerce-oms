@@ -140,6 +140,20 @@ public final class Money implements Comparable<Money>, Serializable {
                 .divide(BigDecimal.valueOf(whole), SCALE, ROUNDING), currency);
     }
 
+    /**
+     * Proportional share using money ratios: {@code amount * (part / whole)}.
+     *
+     * <p>Used to apportion an order-level discount across lines by their share of the
+     * subtotal. As with {@link #prorate(int, int)}, the caller must give the final slice the
+     * rounding remainder so the parts sum exactly to the whole.
+     */
+    public Money prorate(BigDecimal part, BigDecimal whole) {
+        if (whole == null || whole.signum() == 0) {
+            return zero(currency);
+        }
+        return new Money(this.amount.multiply(part).divide(whole, SCALE, ROUNDING), currency);
+    }
+
     public Money negated() {
         return new Money(this.amount.negate(), currency);
     }
