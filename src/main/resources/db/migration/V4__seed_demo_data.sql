@@ -125,7 +125,7 @@ INSERT INTO inventory_items (variant_id, warehouse_id, on_hand, reserved, reorde
  (20, 1,  8, 0, 3, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
 
 -- ------------------------------------------------------------------ discounts
-INSERT INTO discounts (code, description, type, value, max_discount_amount, max_discount_currency,
+INSERT INTO discounts (code, description, type, discount_value, max_discount_amount, max_discount_currency,
                        min_order_value_amount, min_order_value_currency, category_id,
                        starts_at, ends_at, usage_limit, per_customer_limit, times_redeemed, active, version,
                        created_at, updated_at) VALUES

@@ -1,0 +1,40 @@
+# Test profile. Same engine, same migrations, same ddl-auto: validate as production —
+# a test run that used Hibernate-generated DDL would not be testing the real schema.
+spring:
+  datasource:
+    url: jdbc:h2:mem:oms-test;MODE=PostgreSQL;DATABASE_TO_LOWER=TRUE;DEFAULT_LOCK_TIMEOUT=10000;DB_CLOSE_DELAY=-1
+    driver-class-name: org.h2.Driver
+    username: sa
+    password: ""
+    hikari:
+      # Comfortably above the 50 concurrent threads used by OversellPreventionIT so that
+      # connection starvation cannot be mistaken for a locking failure.
+      maximum-pool-size: 60
+      minimum-idle: 10
+      pool-name: oms-test-hikari
+  jpa:
+    database-platform: org.hibernate.dialect.H2Dialect
+    hibernate:
+      ddl-auto: validate
+  flyway:
+    enabled: true
+    clean-disabled: false
+
+oms:
+  inventory:
+    # Short TTL so sweeper behaviour is observable without a slow test.
+    reservation-ttl: PT2S
+    sweeper-interval-ms: 500
+  outbox:
+    retry-interval-ms: 500
+    max-attempts: 3
+    stale-after: PT1S
+  idempotency:
+    retention: PT1H
+
+logging:
+  level:
+    root: WARN
+    com.ecommerce.oms: INFO
+    org.flywaydb: WARN
+    org.hibernate.tool.schema: WARN

@@ -24,7 +24,9 @@ CREATE TABLE discounts (
     code                    VARCHAR(40)   NOT NULL,
     description             VARCHAR(255),
     type                    VARCHAR(40)   NOT NULL,
-    value                   DECIMAL(19,4) NOT NULL,
+    -- Named `discount_value` rather than `value`: VALUE is a reserved word in both H2 and
+    -- the SQL standard, and quoting identifiers would break the vendor-neutral goal.
+    discount_value          DECIMAL(19,4) NOT NULL,
     max_discount_amount     DECIMAL(19,2),
     max_discount_currency   VARCHAR(3),
     min_order_value_amount  DECIMAL(19,2),
@@ -41,7 +43,7 @@ CREATE TABLE discounts (
     updated_at              TIMESTAMP     NOT NULL,
     CONSTRAINT uq_discounts_code UNIQUE (code),
     CONSTRAINT fk_discounts_category FOREIGN KEY (category_id) REFERENCES categories (id),
-    CONSTRAINT ck_discount_value_positive CHECK (value > 0),
+    CONSTRAINT ck_discount_value_positive CHECK (discount_value > 0),
     CONSTRAINT ck_discount_window CHECK (ends_at > starts_at)
 );
 
